@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kubernetes Request & Limit Calculator</title>
+<style>
+* { box-sizing: border-box; font-family: Arial, sans-serif; }
+body {
+  margin: 0;
+  background: #f4f6f8;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+}
+.card {
+  background: #fff;
+  width: 650px;
+  padding: 30px;
+  border-radius: 16px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+}
+h1 { text-align: center; margin-bottom: 1rem; }
+label { font-weight: 600; display: block; margin-top: 10px; }
+select, input, button {
+  width: 100%;
+  padding: 8px;
+  margin-top: 6px;
+  border-radius: 6px;
+  border: 1px solid #ccc;
+}
+.info {
+  background: #f9fafc;
+  border-left: 4px solid #42a5f5;
+  padding: 15px;
+  margin-top: 15px;
+  border-radius: 6px;
+  display: none;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.range-block { margin-top: 12px; }
+.range-value {
+  font-size: 0.9rem;
+  color: #333;
+  margin-top: 4px;
+}
+.result {
+  margin-top: 20px;
+  background: #eef6ff;
+  padding: 12px;
+  border-radius: 8px;
+  font-family: monospace;
+  white-space: pre-wrap;
+}
+button {
+  background: #42a5f5;
+  color: white;
+  font-size: 1rem;
+  margin-top: 16px;
+  cursor: pointer;
+  border: none;
+  border-radius: 6px;
+  padding: 10px;
+}
+button:hover { background: #1e88e5; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Kubernetes Request & Limit Calculator</h1>
+  <select id="language" onchange="showInfo()">
+    <option value="">-- Select --</option>
+    <option value="Java">Java</option>
+    <option value="Python">Python</option>
+    <option value="JavaScript">JavaScript</option>
+  </select>
+  <div id="infoBox" class="info"></div>
+  <div style="margin-top:20px;">
+    <button onclick="calculate()">Calculate</button>
+  </div>
+  <div id="resultBox" class="result" style="display:none"></div>
+</div>
+
+<script>
+const languageInfo = {
+  Java: {
+    text: `<strong>Java (JVM)</strong>
+           <ul>
+           <li>Heap: Xms (initial) and Xmx (max)</li>
+           <li>GC overhead</li>
+           <li>Metaspace, Thread stacks, JIT code cache, GC structures, Other JVM objects</li>
+           </ul>`,
+    sliders: [
+      {id:"xms",label:"Initial Heap Size (-Xms) [Mi]",min:256,max:65536,step:256,value:2048},
+      {id:"xmx",label:"Maximum Heap Size (-Xmx) [Mi]",min:512,max:65536,step:256,value:4096},
+      {id:"gc",label:"GC Overhead (%)",min:0,max:50,step:2,value:30},
+      {id:"metaspace",label:"Metaspace [Mi]",min:0,max:4096,step:16,value:0},
+      {id:"threadStacks",label:"Thread Stacks [Mi]",min:0,max:4096,step:16,value:0},
+      {id:"jitCache",label:"JIT Code Cache [Mi]",min:0,max:4096,step:16,value:0},
+      {id:"gcStruct",label:"GC Structures [Mi]",min:0,max:4096,step:16,value:0},
+      {id:"other",label:"Other JVM Objects [Mi]",min:0,max:4096,step:16,value:0}
+    ]
+  },
+  Python: {
+    text: `<strong>Python</strong>
+           <ul>
+           <li>Gunicorn workers, each uses memory ~80–150MiB.</li>
+           <li>Master process memory</li>
+           <li>Scale horizontally rather than huge CPU in one pod.</li>
+           </ul>`,
+    sliders:[
+      {id:"workers", label:"Gunicorn Workers", min:1, max:16, step:1, value:4},
+      {id:"memPerWorker", label:"Memory per Worker [Mi]", min:2, max:32768, step:2, value:120},
+      {id:"master", label:"Master Process Memory [Mi]", min:2, max:32768, step:2, value:40},
+      {id:"rps", label:"Expected Requests/sec", min:10, max:500, value:100}
+    ]
+  },
+  JavaScript: {
+    text:`<strong>Node.js</strong>
+          <ul>
+          <li>Heap limited by V8 (~2 GiB default).</li>
+          <li>Memory-heavy tasks need --max-old-space-size.</li>
+          <li>Workers & master memory included in calculation.</li>
+          </ul>`,
+    sliders:[
+      {id:"workers", label:"Node.js Workers", min:1, max:16, step:1, value:2},
+      {id:"memPerWorker", label:"Memory per Worker [Mi]", min:2, max:32768, step:2, value:120},
+      {id:"master", label:"Master Process Memory [Mi]", min:2, max:32768, step:2, value:40},
+      {id:"overheadFactor", label:"Overhead Factor (%)", min:0, max:50, step:5, value:25},
+      {id:"rps", label:"Expected Requests/sec", min:10, max:1000, value:200}
+    ]
+  }
+};
+
+function showInfo(){
+  const val = document.getElementById('language').value;
+  const box = document.getElementById('infoBox');
+  document.getElementById('resultBox').style.display="none";
+  if(!val || !languageInfo[val]){
+    box.style.display='none';
+    box.innerHTML='';
+    return;
+  }
+  const {text, sliders} = languageInfo[val];
+  let sliderHtml = sliders.map(s=>`
+    <div class="range-block">
+      <label for="${s.id}">${s.label}</label>
+      <input type="range" id="${s.id}" min="${s.min}" max="${s.max}" ${s.step?`step="${s.step}"`:''} value="${s.value}" oninput="updateValue('${s.id}',this.value)">
+      <div class="range-value" id="${s.id}-val">${s.value}</div>
+    </div>
+  `).join('');
+  box.innerHTML=text+sliderHtml;
+  box.style.display='block';
+}
+
+function updateValue(id,value){
+  document.getElementById(id+"-val").innerText=value;
+}
+
+function calculate(){
+  const lang=document.getElementById('language').value;
+  let resultText="";
+  if(lang==="Java"){
+    const xms = parseInt(document.getElementById("xms").value);
+    const xmx = parseInt(document.getElementById("xmx").value);
+    const gcPct = parseInt(document.getElementById("gc").value) / 100;
+    const metaspace = parseInt(document.getElementById("metaspace").value);
+    const threadStacks = parseInt(document.getElementById("threadStacks").value);
+    const jitCache = parseInt(document.getElementById("jitCache").value);
+    const gcStruct = parseInt(document.getElementById("gcStruct").value);
+    const other = parseInt(document.getElementById("other").value);
+    const heapOverhead = xmx + metaspace + threadStacks + jitCache + gcStruct + other;
+    let overheadFactor = heapOverhead / xmx;
+    if (overheadFactor < 0.25) overheadFactor = 0.25;
+    if (overheadFactor > 0.30) overheadFactor = 0.30;
+    const cpuReqBase = 0.5 * (xmx / 1024);
+    const recs = {
+      minimal: {
+        memRequest: Math.round(xms + xms * overheadFactor * 0.5),
+        memLimit: Math.round(xmx + xmx * overheadFactor * 0.5),
+        cpuReq: (cpuReqBase * 0.7).toFixed(2),
+        cpuLimit: (cpuReqBase * 1.2).toFixed(2)
+      },
+      balanced: {
+        memRequest: Math.round(xms + xms * overheadFactor),
+        memLimit: Math.round(xmx + xmx * overheadFactor),
+        cpuReq: cpuReqBase.toFixed(2),
+        cpuLimit: (cpuReqBase * 2).toFixed(2)
+      },
+      maximum: {
+        memRequest: Math.round(xms + xms * overheadFactor * 1.5),
+        memLimit: Math.round(xmx + xmx * overheadFactor * 1.5),
+        cpuReq: (cpuReqBase * 1.5).toFixed(2),
+        cpuLimit: (cpuReqBase * 3).toFixed(2)
+      }
+    };
+    resultText =
+      `Java Recommended Resources:\n\n` +
+      `Minimal:\n` +
+      `  Memory Request: ${recs.minimal.memRequest} Mi\n` +
+      `  Memory Limit:   ${recs.minimal.memLimit} Mi\n` +
+      `  CPU Request:    ${recs.minimal.cpuReq} cores\n` +
+      `  CPU Limit:      ${recs.minimal.cpuLimit} cores\n\n` +
+      `Balanced:\n` +
+      `  Memory Request: ${recs.balanced.memRequest} Mi\n` +
+      `  Memory Limit:   ${recs.balanced.memLimit} Mi\n` +
+      `  CPU Request:    ${recs.balanced.cpuReq} cores\n` +
+      `  CPU Limit:      ${recs.balanced.cpuLimit} cores\n\n` +
+      `Maximum:\n` +
+      `  Memory Request: ${recs.maximum.memRequest} Mi\n` +
+      `  Memory Limit:   ${recs.maximum.memLimit} Mi\n` +
+      `  CPU Request:    ${recs.maximum.cpuReq} cores\n` +
+      `  CPU Limit:      ${recs.maximum.cpuLimit} cores`;
+  }
+  if (lang === "Python") {
+    const workers = parseInt(document.getElementById("workers").value);
+    const memPerWorker = parseInt(document.getElementById("memPerWorker").value);
+    const master = parseInt(document.getElementById("master").value);
+    const rawMem = workers * memPerWorker + master;
+    const totalMem = rawMem * 1.25;
+    const cpuBase = 0.1 * workers;
+    const recs = {
+      minimal: {
+        memRequest: Math.round(rawMem),
+        memLimit: Math.round(rawMem * 1.1),
+        cpuReq: (cpuBase * 0.7).toFixed(2),
+        cpuLimit: (cpuBase * 1.5).toFixed(2)
+      },
+      balanced: {
+        memRequest: Math.round(totalMem * 0.8),
+        memLimit: Math.round(totalMem),
+        cpuReq: cpuBase.toFixed(2),
+        cpuLimit: (cpuBase * 2).toFixed(2)
+      },
+      maximum: {
+        memRequest: Math.round(totalMem),
+        memLimit: Math.round(totalMem * 1.4),
+        cpuReq: (cpuBase * 1.5).toFixed(2),
+        cpuLimit: (cpuBase * 3).toFixed(2)
+      }
+    };
+    resultText =
+      `Python (Gunicorn) Recommended Resources:\n\n` +
+      `Minimal:\n` +
+      `  Memory Request: ${recs.minimal.memRequest} Mi\n` +
+      `  Memory Limit:   ${recs.minimal.memLimit} Mi\n` +
+      `  CPU Request:    ${recs.minimal.cpuReq} cores\n` +
+      `  CPU Limit:      ${recs.minimal.cpuLimit} cores\n\n` +
+      `Balanced:\n` +
+      `  Memory Request: ${recs.balanced.memRequest} Mi\n` +
+      `  Memory Limit:   ${recs.balanced.memLimit} Mi\n` +
+      `  CPU Request:    ${recs.balanced.cpuReq} cores\n` +
+      `  CPU Limit:      ${recs.balanced.cpuLimit} cores\n\n` +
+      `Maximum:\n` +
+      `  Memory Request: ${recs.maximum.memRequest} Mi\n` +
+      `  Memory Limit:   ${recs.maximum.memLimit} Mi\n` +
+      `  CPU Request:    ${recs.maximum.cpuReq} cores\n` +
+      `  CPU Limit:      ${recs.maximum.cpuLimit} cores`;
+  }
+  if (lang === "JavaScript") {
+    const workers = parseInt(document.getElementById("workers").value);
+    const memPerWorker = parseInt(document.getElementById("memPerWorker").value);
+    const master = parseInt(document.getElementById("master").value);
+    const overheadPct = parseInt(document.getElementById("overheadFactor").value) / 100;
+    const rps = parseInt(document.getElementById("rps").value);
+    const rawMem = workers * memPerWorker + master;
+    const totalMem = rawMem * (1 + overheadPct);
+    const cpuBase = 0.1 * (rps / 50);
+    const recs = {
+      minimal: {
+        memRequest: Math.round(rawMem),
+        memLimit: Math.round(rawMem * (1 + overheadPct * 0.5)),
+        cpuReq: (cpuBase * 0.7).toFixed(2),
+        cpuLimit: (cpuBase * 1.5).toFixed(2)
+      },
+      balanced: {
+        memRequest: Math.round(totalMem * 0.75),
+        memLimit: Math.round(totalMem),
+        cpuReq: cpuBase.toFixed(2),
+        cpuLimit: (cpuBase * 2).toFixed(2)
+      },
+      maximum: {
+        memRequest: Math.round(totalMem),
+        memLimit: Math.round(totalMem * 1.4),
+        cpuReq: (cpuBase * 1.5).toFixed(2),
+        cpuLimit: (cpuBase * 3).toFixed(2)
+      }
+    };
+    resultText =
+      `Node.js Recommended Resources:\n\n` +
+      `Minimal:\n` +
+      `  Memory Request: ${recs.minimal.memRequest} Mi\n` +
+      `  Memory Limit:   ${recs.minimal.memLimit} Mi\n` +
+      `  CPU Request:    ${recs.minimal.cpuReq} cores\n` +
+      `  CPU Limit:      ${recs.minimal.cpuLimit} cores\n\n` +
+      `Balanced:\n` +
+      `  Memory Request: ${recs.balanced.memRequest} Mi\n` +
+      `  Memory Limit:   ${recs.balanced.memLimit} Mi\n` +
+      `  CPU Request:    ${recs.balanced.cpuReq} cores\n` +
+      `  CPU Limit:      ${recs.balanced.cpuLimit} cores\n\n` +
+      `Maximum:\n` +
+      `  Memory Request: ${recs.maximum.memRequest} Mi\n` +
+      `  Memory Limit:   ${recs.maximum.memLimit} Mi\n` +
+      `  CPU Request:    ${recs.maximum.cpuReq} cores\n` +
+      `  CPU Limit:      ${recs.maximum.cpuLimit} cores`;
+  }
+  const resBox=document.getElementById('resultBox');
+  resBox.innerText=resultText;
+  resBox.style.display='block';
+}
+</script>
+</body>
+</html>

@@ -104,7 +104,7 @@ Gunicorn best practices, and V8/Node memory patterns.
 
 
 
-!\[Example Screenshot](docs/test.png)  
+!\[Example Screenshot](https://github.com/ankit-groverDevops/k8s-calculator/tree/main/docs/test.png)  
 
 ---
 
